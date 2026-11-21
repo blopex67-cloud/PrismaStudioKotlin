@@ -2,8 +2,13 @@ package com.chapiodara.prismastudio
 
 import android.app.Activity
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
@@ -27,7 +32,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 private data class SceneObject(val kind: Int, var x: Float = 0f, var y: Float = 0.55f, var z: Float = 0f,
-                               var rotation: Float = 0f, var scale: Float = 0.55f)
+                               var rotation: Float = 0f, var scale: Float = 0.55f, var material: Int = 0)
 
 class MainActivity : Activity() {
     private lateinit var renderer: SceneRenderer
@@ -42,6 +47,15 @@ class MainActivity : Activity() {
     private val panel2 = Color.rgb(40, 42, 49)
     private val accent = Color.rgb(239, 50, 65)
     private var activeTool = "SELECT"
+    private var touchDownX = 0f
+    private var touchDownY = 0f
+    private var touchLastX = 0f
+    private var touchLastY = 0f
+    private var currentFrame = 0
+    private var playing = false
+    private lateinit var frameLabel: TextView
+    private val animationHandler = Handler(Looper.getMainLooper())
+    private val playback = object : Runnable { override fun run() { if (playing) { setFrame((currentFrame + 1) % 121); animationHandler.postDelayed(this, 120) } } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,9 +71,10 @@ class MainActivity : Activity() {
             setOnTouchListener { _, event ->
                 scaleDetector.onTouchEvent(event)
                 when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> { renderer.beginDrag(event.x, event.y); true }
+                    MotionEvent.ACTION_DOWN -> { touchDownX = event.x; touchDownY = event.y; touchLastX = event.x; touchLastY = event.y; renderer.beginDrag(event.x, event.y); true }
                     MotionEvent.ACTION_POINTER_DOWN -> true
-                    MotionEvent.ACTION_MOVE -> { if (!scaleDetector.isInProgress && event.pointerCount == 1) renderer.drag(event.x, event.y); true }
+                    MotionEvent.ACTION_MOVE -> { if (!scaleDetector.isInProgress && event.pointerCount == 1) { if (activeTool == "SELECT") renderer.drag(event.x, event.y) else renderer.toolDrag(activeTool, event.x - touchLastX, event.y - touchLastY); touchLastX = event.x; touchLastY = event.y }; true }
+                    MotionEvent.ACTION_UP -> { if (kotlin.math.abs(event.x - touchDownX) + kotlin.math.abs(event.y - touchDownY) < dp(10) && activeTool == "SELECT") { renderer.selectNext(); refresh() }; true }
                     else -> true
                 }
             }
@@ -114,33 +129,27 @@ class MainActivity : Activity() {
     }
 
     private fun addTool(rail: LinearLayout, icon: String, label: String, tool: String) {
-        val v = TextView(this).apply {
-            text = "$icon\n$label"; gravity = Gravity.CENTER; textSize = 10f; setTextColor(if (activeTool == tool) Color.WHITE else Color.LTGRAY)
-            setBackgroundColor(if (activeTool == tool) accent else panel2); setPadding(0, dp(4), 0, dp(4))
-            layoutParams = LinearLayout.LayoutParams(-1, dp(45)).apply { setMargins(0, dp(2), 0, dp(2)) }
-            setOnClickListener { activeTool = tool; refreshToolRail() }
+        val tile = IconToolTile(this, icon, label, activeTool == tool) {
+            activeTool = tool
+            refreshToolRail()
         }
-        v.tag = "tool:$tool"; rail.addView(v)
+        tile.tag = "tool:$tool"
+        tile.layoutParams = LinearLayout.LayoutParams(-1, dp(48)).apply { setMargins(0, dp(2), 0, dp(2)) }
+        rail.addView(tile)
     }
 
     private fun addRailAction(rail: LinearLayout, icon: String, label: String, action: () -> Unit) {
-        rail.addView(TextView(this).apply {
-            text = "$icon\n$label"; gravity = Gravity.CENTER; textSize = 10f; setTextColor(Color.LTGRAY); setBackgroundColor(panel2); setPadding(0, dp(4), 0, dp(4))
-            layoutParams = LinearLayout.LayoutParams(-1, dp(43)).apply { setMargins(0, dp(2), 0, dp(2)) }; setOnClickListener { action() }
-        })
+        val tile = IconToolTile(this, icon, label, false, action)
+        tile.layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { setMargins(0, dp(2), 0, dp(2)) }
+        rail.addView(tile)
     }
 
     private fun refreshToolRail() {
         if (!::toolRail.isInitialized) return
-        val rail = toolRail
-        for (i in 0 until rail.childCount) {
-            val v = rail.getChildAt(i)
+        for (i in 0 until toolRail.childCount) {
+            val v = toolRail.getChildAt(i)
             val tag = v.tag?.toString() ?: continue
-            if (tag.startsWith("tool:")) {
-                val active = tag.substringAfter(":") == activeTool
-                (v as TextView).setBackgroundColor(if (active) accent else panel2)
-                v.setTextColor(if (active) Color.WHITE else Color.LTGRAY)
-            }
+            if (tag.startsWith("tool:")) (v as IconToolTile).setActive(tag.substringAfter(":") == activeTool)
         }
     }
 
@@ -173,7 +182,8 @@ class MainActivity : Activity() {
             hierarchy.addView(row)
         }
         val obj = list.getOrNull(selected)
-        properties.text = if (obj == null) "Sin selección" else "Posición\nX  ${fmt(obj.x)}\nY  ${fmt(obj.y)}\nZ  ${fmt(obj.z)}\n\nRotación\nY  ${fmt(obj.rotation)}°\n\nEscala\n${fmt(obj.scale)}"
+        val materialNames = listOf("Cian", "Rojo", "Verde", "Dorado", "Violeta")
+        properties.text = if (obj == null) "Sin selección" else "Posición\nX  ${fmt(obj.x)}\nY  ${fmt(obj.y)}\nZ  ${fmt(obj.z)}\n\nRotación\nY  ${fmt(obj.rotation)}°\n\nEscala\n${fmt(obj.scale)}\n\nMaterial\n${materialNames[obj.material.coerceIn(0, materialNames.lastIndex)]}"
         status.text = "$count objeto${if (count == 1) "" else "s"}"
     }
 
@@ -181,12 +191,14 @@ class MainActivity : Activity() {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(10), 0, dp(10), 0); setBackgroundColor(Color.rgb(25, 26, 31)) }
         row.addView(TextView(this).apply { text = "ANIMACIÓN"; textSize = 10f; setTypeface(null, 1); setTextColor(Color.LTGRAY) }, LinearLayout.LayoutParams(dp(92), -1))
         val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(panel2); setPadding(dp(7), 0, dp(7), 0) }
-        line.addView(TextView(this).apply { text = "▶"; setTextColor(Color.WHITE); textSize = 12f; gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(34), -1))
-        val ticks = TextView(this).apply { text = "│   0       │   10      │   20      │   30      │   40      │   50"; textSize = 10f; setTextColor(Color.GRAY); gravity = Gravity.CENTER_VERTICAL; setPadding(dp(5), 0, 0, 0) }
-        line.addView(ticks, LinearLayout.LayoutParams(0, -1, 1f))
-        line.addView(TextView(this).apply { text = "◆"; setTextColor(accent); gravity = Gravity.CENTER; textSize = 16f }, LinearLayout.LayoutParams(dp(34), -1))
+        line.addView(makeTimelineControl("−10") { setFrame((currentFrame - 10).coerceAtLeast(0)) }, LinearLayout.LayoutParams(dp(42), -1))
+        line.addView(makeTimelineControl("▶") { togglePlayback() }, LinearLayout.LayoutParams(dp(36), -1))
+        frameLabel = TextView(this).apply { text = "Fotograma 0"; setTextColor(Color.WHITE); textSize = 10f; gravity = Gravity.CENTER }
+        line.addView(frameLabel, LinearLayout.LayoutParams(0, -1, 1f))
+        line.addView(makeTimelineControl("◆") { renderer.setKeyframe(currentFrame); Toast.makeText(this@MainActivity, "Clave guardada en fotograma $currentFrame", Toast.LENGTH_SHORT).show() }, LinearLayout.LayoutParams(dp(38), -1))
+        line.addView(makeTimelineControl("+10") { setFrame((currentFrame + 10).coerceAtMost(120)) }, LinearLayout.LayoutParams(dp(42), -1))
         row.addView(line, LinearLayout.LayoutParams(0, dp(38), 1f))
-        row.addView(TextView(this).apply { text = "  00:00 / 00:05"; setTextColor(Color.LTGRAY); textSize = 9f; gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(100), -1))
+        row.addView(TextView(this).apply { text = "  ${(currentFrame / 24)}s / 5s"; setTextColor(Color.LTGRAY); textSize = 9f; gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(55), -1))
         return row
     }
 
@@ -196,15 +208,21 @@ class MainActivity : Activity() {
             row.addView(TextView(this).apply {
                 text = label; textSize = 10f; setTypeface(null, 1); gravity = Gravity.CENTER; setTextColor(if (i == 0) Color.WHITE else Color.LTGRAY)
                 setBackgroundColor(if (i == 0) accent else panel2); layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(3), 0, dp(3), 0) }
+                setOnClickListener { when (label) { "OBJETOS" -> { renderer.selectNext(); refresh() }; "MATERIAL" -> { renderer.nextMaterial(); refresh() }; "ANIMAR" -> { renderer.setKeyframe(currentFrame); Toast.makeText(this@MainActivity, "Clave guardada: $currentFrame", Toast.LENGTH_SHORT).show() } } }
             })
         }
         val spacer = View(this); row.addView(spacer, LinearLayout.LayoutParams(dp(12), 1))
-        row.addView(makeBottomAction("Mover X") { renderer.transform { it.x += 0.25f }; refresh() })
-        row.addView(makeBottomAction("Girar Y") { renderer.transform { it.rotation += 15f }; refresh() })
-        row.addView(makeBottomAction("Escala +") { renderer.transform { it.scale = (it.scale + 0.1f).coerceAtMost(2f) }; refresh() })
-        row.addView(makeBottomAction("Borrar") { renderer.removeSelected(); refresh() })
+        row.addView(makeBottomAction("↔ Mover") { renderer.transform { it.x += 0.25f }; refresh() })
+        row.addView(makeBottomAction("⟳ Girar") { renderer.transform { it.rotation += 15f }; refresh() })
+        row.addView(makeBottomAction("⇲ Escala") { renderer.transform { it.scale = (it.scale + 0.1f).coerceAtMost(2f) }; refresh() })
+        row.addView(makeBottomAction("⌫ Borrar") { renderer.removeSelected(); refresh() })
         return row
     }
+
+    private fun makeTimelineControl(label: String, action: () -> Unit) = TextView(this).apply { text = label; textSize = 11f; gravity = Gravity.CENTER; setTextColor(Color.WHITE); setOnClickListener { action() } }
+
+    private fun setFrame(frame: Int) { currentFrame = frame.coerceIn(0, 120); renderer.goToFrame(currentFrame); if (::frameLabel.isInitialized) frameLabel.text = "Fotograma $currentFrame"; refresh() }
+    private fun togglePlayback() { playing = !playing; if (playing) animationHandler.post(playback) else animationHandler.removeCallbacks(playback) }
 
     private fun makeBottomAction(label: String, action: () -> Unit) = TextView(this).apply {
         text = label; textSize = 10f; gravity = Gravity.CENTER; setTextColor(Color.LTGRAY); setBackgroundColor(panel2)
@@ -220,26 +238,81 @@ class MainActivity : Activity() {
             val file = File(filesDir, "escena.json"); if (!file.exists()) return
             val json = JSONObject(file.readText()).getJSONArray("objects"); val items = mutableListOf<SceneObject>()
             for (i in 0 until json.length()) { val item = json.getJSONObject(i); items.add(SceneObject(if (item.optString("type") == "esfera") 1 else 0,
-                item.optDouble("x", 0.0).toFloat(), item.optDouble("y", 0.55).toFloat(), item.optDouble("z", 0.0).toFloat(), item.optDouble("rotation", 0.0).toFloat(), item.optDouble("scale", 0.55).toFloat())) }
+                item.optDouble("x", 0.0).toFloat(), item.optDouble("y", 0.55).toFloat(), item.optDouble("z", 0.0).toFloat(), item.optDouble("rotation", 0.0).toFloat(), item.optDouble("scale", 0.55).toFloat(), item.optInt("material", 0))) }
             if (items.isNotEmpty()) renderer.replace(items)
+            val frames = JSONObject(file.readText()).optJSONArray("keyframes")
+            if (frames != null) renderer.loadKeyframes(frames)
         } catch (_: Exception) { }
     }
 
     private fun saveScene() {
         renderer.snapshot { list ->
-            try { val arr = JSONArray(); list.forEach { o -> arr.put(JSONObject().put("type", if (o.kind == 0) "cubo" else "esfera").put("x", o.x).put("y", o.y).put("z", o.z).put("rotation", o.rotation).put("scale", o.scale)) }
-                File(filesDir, "escena.json").writeText(JSONObject().put("name", "Mi proyecto").put("objects", arr).toString(2))
+            try { val arr = JSONArray(); list.forEach { o -> arr.put(JSONObject().put("type", if (o.kind == 0) "cubo" else "esfera").put("x", o.x).put("y", o.y).put("z", o.z).put("rotation", o.rotation).put("scale", o.scale).put("material", o.material)) }
+                val frameArray = JSONArray()
+                renderer.keyframesSnapshot().forEach { (frame, frameObjects) ->
+                    val frameObjectsJson = JSONArray()
+                    frameObjects.forEach { o -> frameObjectsJson.put(JSONObject().put("type", if (o.kind == 0) "cubo" else "esfera").put("x", o.x).put("y", o.y).put("z", o.z).put("rotation", o.rotation).put("scale", o.scale).put("material", o.material)) }
+                    frameArray.put(JSONObject().put("frame", frame).put("objects", frameObjectsJson))
+                }
+                File(filesDir, "escena.json").writeText(JSONObject().put("name", "Mi proyecto").put("objects", arr).put("keyframes", frameArray).toString(2))
                 runOnUiThread { Toast.makeText(this, "Proyecto guardado", Toast.LENGTH_SHORT).show() }
             } catch (_: Exception) { runOnUiThread { Toast.makeText(this, "No se pudo guardar", Toast.LENGTH_SHORT).show() } }
         }
     }
 
     override fun onResume() { super.onResume(); if (::glView.isInitialized) glView.onResume() }
-    override fun onPause() { if (::glView.isInitialized) glView.onPause(); super.onPause() }
+    override fun onPause() { playing = false; animationHandler.removeCallbacks(playback); if (::glView.isInitialized) glView.onPause(); super.onPause() }
+}
+
+private class IconToolTile(context: Context, icon: String, label: String, active: Boolean, action: () -> Unit) : LinearLayout(context) {
+    private val caption = TextView(context)
+    init {
+        orientation = VERTICAL
+        gravity = Gravity.CENTER
+        setPadding(0, dp(3), 0, dp(2))
+        addView(DrawnIconView(context, if (icon == "+") label else icon, Color.WHITE), LayoutParams(dp(20), dp(21)))
+        caption.text = label
+        caption.textSize = 8.5f
+        caption.gravity = Gravity.CENTER
+        caption.setTextColor(Color.LTGRAY)
+        addView(caption, LayoutParams(-1, dp(17)))
+        setActive(active)
+        setOnClickListener { action() }
+    }
+    fun setActive(active: Boolean) {
+        setBackgroundColor(if (active) Color.rgb(201, 44, 58) else Color.rgb(40, 42, 49))
+        caption.setTextColor(if (active) Color.WHITE else Color.LTGRAY)
+    }
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+}
+
+private class DrawnIconView(context: Context, private val name: String, private val tint: Int) : View(context) {
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = tint; style = Paint.Style.STROKE; strokeWidth = 2.1f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val s = minOf(width, height).toFloat(); val cx = width / 2f; val cy = height / 2f
+        canvas.save(); canvas.translate(cx - s * .5f, cy - s * .5f); canvas.scale(s / 24f, s / 24f)
+        fun line(x: Float,y: Float,a: Float,b: Float) = canvas.drawLine(x,y,a,b,p)
+        when (name.lowercase()) {
+            "select", "⌖" -> { canvas.drawCircle(12f,12f,6f,p); line(12f,1f,12f,6f); line(12f,18f,12f,23f); line(1f,12f,6f,12f); line(18f,12f,23f,12f) }
+            "mover", "↔" -> { line(4f,12f,20f,12f); line(4f,12f,8f,8f); line(4f,12f,8f,16f); line(20f,12f,16f,8f); line(20f,12f,16f,16f); line(12f,4f,12f,20f); line(12f,4f,8f,8f); line(12f,4f,16f,8f); line(12f,20f,8f,16f); line(12f,20f,16f,16f) }
+            "rotar", "⟳" -> { canvas.drawArc(4f,4f,20f,20f,40f,280f,false,p); line(19f,4f,20f,9f); line(19f,4f,14f,5f) }
+            "escala", "⇲" -> { line(4f,9f,4f,4f); line(4f,4f,9f,4f); line(4f,4f,10f,10f); line(20f,15f,20f,20f); line(20f,20f,15f,20f); line(20f,20f,14f,14f) }
+            "cubo", "+" -> { val a=Path().apply { moveTo(12f,3f); lineTo(21f,8f); lineTo(12f,13f); lineTo(3f,8f); close(); moveTo(3f,8f); lineTo(3f,18f); lineTo(12f,23f); lineTo(21f,18f); lineTo(21f,8f); moveTo(12f,13f); lineTo(12f,23f) }; canvas.drawPath(a,p) }
+            "esfera" -> canvas.drawCircle(12f,12f,8f,p)
+            "guardar", "▣ guardar" -> { canvas.drawRoundRect(4f,3f,20f,21f,2f,2f,p); canvas.drawRect(7f,4f,17f,10f,p); canvas.drawRoundRect(7f,13f,17f,20f,1f,1f,p) }
+            "play", "▶" -> { val a=Path().apply { moveTo(7f,4f); lineTo(20f,12f); lineTo(7f,20f); close() }; canvas.drawPath(a,p) }
+            "keyframe", "◆" -> { val a=Path().apply { moveTo(12f,3f); lineTo(21f,12f); lineTo(12f,21f); lineTo(3f,12f); close() }; canvas.drawPath(a,p) }
+            "borrar" -> { canvas.drawRoundRect(6f,7f,18f,21f,2f,2f,p); line(4f,5f,20f,5f); line(9f,3f,15f,3f); line(10f,10f,10f,18f); line(14f,10f,14f,18f) }
+            else -> { line(12f,4f,12f,20f); line(4f,12f,20f,12f) }
+        }
+        canvas.restore()
+    }
 }
 
 private class SceneRenderer(private val context: Context) : GLSurfaceView.Renderer {
     private val objects = mutableListOf(SceneObject(0))
+    private val keyframes = java.util.TreeMap<Int, List<SceneObject>>()
     private var selected = 0
     private var program = 0
     private var cube: FloatBuffer? = null
@@ -265,6 +338,33 @@ private class SceneRenderer(private val context: Context) : GLSurfaceView.Render
     @Synchronized fun add(kind: Int) { objects.add(SceneObject(kind, x = ((objects.size % 3) - 1) * 0.8f)); selected = objects.lastIndex }
     @Synchronized fun removeSelected() { if (objects.size > 1) { objects.removeAt(selected.coerceIn(0, objects.lastIndex)); selected = (objects.size - 1).coerceAtLeast(0) } }
     @Synchronized fun transform(f: (SceneObject) -> Unit) { if (objects.isNotEmpty()) f(objects[selected.coerceIn(0, objects.lastIndex)]) }
+    @Synchronized fun nextMaterial() { if (objects.isNotEmpty()) objects[selected.coerceIn(0, objects.lastIndex)].material = (objects[selected.coerceIn(0, objects.lastIndex)].material + 1) % 5 }
+    @Synchronized fun setKeyframe(frame: Int) { keyframes[frame] = objects.map { it.copy() } }
+    @Synchronized fun keyframesSnapshot() = keyframes.mapValues { entry -> entry.value.map { it.copy() } }
+    @Synchronized fun loadKeyframes(frames: JSONArray) {
+        keyframes.clear()
+        for (i in 0 until frames.length()) {
+            val frameItem = frames.optJSONObject(i) ?: continue
+            val values = frameItem.optJSONArray("objects") ?: continue
+            val items = mutableListOf<SceneObject>()
+            for (j in 0 until values.length()) {
+                val o = values.optJSONObject(j) ?: continue
+                items.add(SceneObject(if (o.optString("type") == "esfera") 1 else 0, o.optDouble("x", 0.0).toFloat(), o.optDouble("y", 0.55).toFloat(), o.optDouble("z", 0.0).toFloat(), o.optDouble("rotation", 0.0).toFloat(), o.optDouble("scale", 0.55).toFloat(), o.optInt("material", 0)))
+            }
+            keyframes[frameItem.optInt("frame")] = items
+        }
+    }
+    @Synchronized fun goToFrame(frame: Int) {
+        val lo = keyframes.floorEntry(frame) ?: keyframes.firstEntry() ?: return
+        val hi = keyframes.ceilingEntry(frame) ?: lo
+        val t = if (hi.key == lo.key) 0f else ((frame - lo.key).toFloat() / (hi.key - lo.key)).coerceIn(0f, 1f)
+        val from = lo.value; val to = hi.value
+        for (i in objects.indices) {
+            val a = from.getOrNull(i) ?: continue; val b = to.getOrNull(i) ?: a; val o = objects[i]
+            o.x = a.x + (b.x - a.x) * t; o.y = a.y + (b.y - a.y) * t; o.z = a.z + (b.z - a.z) * t
+            o.rotation = a.rotation + (b.rotation - a.rotation) * t; o.scale = a.scale + (b.scale - a.scale) * t
+        }
+    }
     @Synchronized fun objectCount() = objects.size
     @Synchronized fun selectedIndex() = selected
     @Synchronized fun objectsSnapshot() = objects.map { it.copy() }
@@ -276,6 +376,15 @@ private class SceneRenderer(private val context: Context) : GLSurfaceView.Render
     @Synchronized fun snapshot(done: (List<SceneObject>) -> Unit) { done(objects.map { it.copy() }) }
     @Synchronized fun beginDrag(x: Float, y: Float) { lastX = x; lastY = y }
     @Synchronized fun drag(x: Float, y: Float) { yaw += (x - lastX) * 0.45f; pitch = (pitch + (y - lastY) * 0.35f).coerceIn(5f, 78f); lastX = x; lastY = y }
+    @Synchronized fun toolDrag(tool: String, dx: Float, dy: Float) {
+        if (objects.isEmpty()) return
+        val o = objects[selected.coerceIn(0, objects.lastIndex)]
+        when (tool) {
+            "MOVE" -> { o.x += dx * 0.012f; o.y = (o.y - dy * 0.012f).coerceAtLeast(0.08f) }
+            "ROTATE" -> o.rotation += dx * 0.7f
+            "SCALE" -> o.scale = (o.scale + dx * 0.004f).coerceIn(0.1f, 3f)
+        }
+    }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0.06f, 0.065f, 0.075f, 1f); GLES20.glEnable(GLES20.GL_DEPTH_TEST); GLES20.glEnable(GLES20.GL_CULL_FACE)
@@ -303,7 +412,9 @@ private class SceneRenderer(private val context: Context) : GLSurfaceView.Render
                 Matrix.multiplyMM(mv, 0, view, 0, model, 0); Matrix.multiplyMM(mvp, 0, projection, 0, mv, 0)
                 GLES20.glUniformMatrix4fv(mvpLoc, 1, false, mvp, 0); GLES20.glUniformMatrix4fv(modelLoc, 1, false, model, 0)
                 val hot = i == selected
-                GLES20.glUniform4f(colorLoc, if (hot) 0.30f else 0.22f, if (hot) 0.66f else 0.60f, if (hot) 0.78f else 0.70f, 1f)
+                val palette = arrayOf(floatArrayOf(0.30f,0.66f,0.78f), floatArrayOf(0.87f,0.28f,0.24f), floatArrayOf(0.28f,0.76f,0.44f), floatArrayOf(0.94f,0.70f,0.22f), floatArrayOf(0.62f,0.38f,0.88f))
+                val c = palette[o.material.coerceIn(0, palette.lastIndex)]
+                GLES20.glUniform4f(colorLoc, c[0], c[1], c[2], 1f)
                 val b = if (o.kind == 0) cube else sphere; val count = if (o.kind == 0) cubeCount else sphereCount
                 b?.position(0); GLES20.glEnableVertexAttribArray(pos); GLES20.glEnableVertexAttribArray(norm)
                 b?.let { GLES20.glVertexAttribPointer(pos, 3, GLES20.GL_FLOAT, false, 24, it); it.position(3); GLES20.glVertexAttribPointer(norm, 3, GLES20.GL_FLOAT, false, 24, it) }
