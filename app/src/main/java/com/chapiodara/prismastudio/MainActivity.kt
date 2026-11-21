@@ -10,6 +10,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.opengl.GLES20
+import android.opengl.GLU
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.view.Gravity
@@ -46,11 +47,12 @@ class MainActivity : Activity() {
     private val panel = Color.rgb(31, 33, 39)
     private val panel2 = Color.rgb(40, 42, 49)
     private val accent = Color.rgb(239, 50, 65)
-    private var activeTool = "SELECT"
+    private var activeTool = "MOVE"
     private var touchDownX = 0f
     private var touchDownY = 0f
     private var touchLastX = 0f
     private var touchLastY = 0f
+    private var gizmoDragging = false
     private var currentFrame = 0
     private var playing = false
     private lateinit var frameLabel: TextView
@@ -71,10 +73,10 @@ class MainActivity : Activity() {
             setOnTouchListener { _, event ->
                 scaleDetector.onTouchEvent(event)
                 when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> { touchDownX = event.x; touchDownY = event.y; touchLastX = event.x; touchLastY = event.y; renderer.beginDrag(event.x, event.y); true }
+                    MotionEvent.ACTION_DOWN -> { touchDownX = event.x; touchDownY = event.y; touchLastX = event.x; touchLastY = event.y; gizmoDragging = activeTool != "SELECT" && renderer.beginGizmoDrag(activeTool, event.x, event.y); if (!gizmoDragging) renderer.beginDrag(event.x, event.y); true }
                     MotionEvent.ACTION_POINTER_DOWN -> true
-                    MotionEvent.ACTION_MOVE -> { if (!scaleDetector.isInProgress && event.pointerCount == 1) { if (activeTool == "SELECT") renderer.drag(event.x, event.y) else renderer.toolDrag(activeTool, event.x - touchLastX, event.y - touchLastY); touchLastX = event.x; touchLastY = event.y }; true }
-                    MotionEvent.ACTION_UP -> { if (kotlin.math.abs(event.x - touchDownX) + kotlin.math.abs(event.y - touchDownY) < dp(10) && activeTool == "SELECT") { renderer.selectNext(); refresh() }; true }
+                    MotionEvent.ACTION_MOVE -> { if (!scaleDetector.isInProgress && event.pointerCount == 1) { if (activeTool == "SELECT") renderer.drag(event.x, event.y) else if (gizmoDragging) renderer.toolDrag(activeTool, event.x - touchLastX, event.y - touchLastY); touchLastX = event.x; touchLastY = event.y; if (gizmoDragging) refresh() }; true }
+                    MotionEvent.ACTION_UP -> { if (kotlin.math.abs(event.x - touchDownX) + kotlin.math.abs(event.y - touchDownY) < dp(10) && activeTool == "SELECT") { renderer.selectAt(event.x, event.y); refresh() }; gizmoDragging = false; true }
                     else -> true
                 }
             }
@@ -104,9 +106,7 @@ class MainActivity : Activity() {
         row.addView(project, LinearLayout.LayoutParams(0, -1, 1f))
         status = TextView(this).apply { text = "1 objeto"; setTextColor(Color.LTGRAY); textSize = 11f; gravity = Gravity.CENTER }
         row.addView(status, LinearLayout.LayoutParams(dp(70), -1))
-        row.addView(makeTopAction("−") { renderer.transform { it.scale = (it.scale - 0.1f).coerceAtLeast(0.15f) }; refresh() })
-        row.addView(makeTopAction("＋") { renderer.transform { it.scale = (it.scale + 0.1f).coerceAtMost(2f) }; refresh() })
-        row.addView(makeTopAction("▣ Guardar") { saveScene() })
+        row.addView(makeTopAction("☰") { saveScene() })
         return row
     }
 
@@ -131,6 +131,7 @@ class MainActivity : Activity() {
     private fun addTool(rail: LinearLayout, icon: String, label: String, tool: String) {
         val tile = IconToolTile(this, icon, label, activeTool == tool) {
             activeTool = tool
+            renderer.setGizmoMode(tool)
             refreshToolRail()
         }
         tile.tag = "tool:$tool"
@@ -211,11 +212,7 @@ class MainActivity : Activity() {
                 setOnClickListener { when (label) { "OBJETOS" -> { renderer.selectNext(); refresh() }; "MATERIAL" -> { renderer.nextMaterial(); refresh() }; "ANIMAR" -> { renderer.setKeyframe(currentFrame); Toast.makeText(this@MainActivity, "Clave guardada: $currentFrame", Toast.LENGTH_SHORT).show() } } }
             })
         }
-        val spacer = View(this); row.addView(spacer, LinearLayout.LayoutParams(dp(12), 1))
-        row.addView(makeBottomAction("↔ Mover") { renderer.transform { it.x += 0.25f }; refresh() })
-        row.addView(makeBottomAction("⟳ Girar") { renderer.transform { it.rotation += 15f }; refresh() })
-        row.addView(makeBottomAction("⇲ Escala") { renderer.transform { it.scale = (it.scale + 0.1f).coerceAtMost(2f) }; refresh() })
-        row.addView(makeBottomAction("⌫ Borrar") { renderer.removeSelected(); refresh() })
+
         return row
     }
 
@@ -328,6 +325,13 @@ private class SceneRenderer(private val context: Context) : GLSurfaceView.Render
     private var distance = 8.5f
     private var lastX = 0f
     private var lastY = 0f
+    private var dragAxis = -1
+    private var dragAxisUx = 0f
+    private var dragAxisUy = 0f
+    private var dragAxisPixels = 1f
+    private var rotateLastAngle = 0f
+    private var rotateLastX = 0f
+    private var rotateLastY = 0f
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
     private val model = FloatArray(16)
@@ -376,14 +380,52 @@ private class SceneRenderer(private val context: Context) : GLSurfaceView.Render
     @Synchronized fun snapshot(done: (List<SceneObject>) -> Unit) { done(objects.map { it.copy() }) }
     @Synchronized fun beginDrag(x: Float, y: Float) { lastX = x; lastY = y }
     @Synchronized fun drag(x: Float, y: Float) { yaw += (x - lastX) * 0.45f; pitch = (pitch + (y - lastY) * 0.35f).coerceIn(5f, 78f); lastX = x; lastY = y }
+
+    private fun projectPoint(x: Float, y: Float, z: Float): FloatArray? {
+        val win = FloatArray(3)
+        val ok = GLU.gluProject(x, y, z, view, 0, projection, 0, intArrayOf(0, 0, width, height), 0, win, 0)
+        return if (ok == 1) floatArrayOf(win[0], height - win[1], win[2]) else null
+    }
+    private fun distToSegment(px: Float, py: Float, a: FloatArray, b: FloatArray): Pair<Float, Float> {
+        val vx=b[0]-a[0]; val vy=b[1]-a[1]; val d=vx*vx+vy*vy
+        val t=if(d<0.001f) 0f else (((px-a[0])*vx+(py-a[1])*vy)/d).coerceIn(0f,1f)
+        val dx=px-(a[0]+t*vx); val dy=py-(a[1]+t*vy)
+        return kotlin.math.sqrt(dx*dx+dy*dy) to kotlin.math.sqrt(d)
+    }
+    @Synchronized fun beginGizmoDrag(tool: String, sx: Float, sy: Float): Boolean {
+        if (objects.isEmpty() || width <= 0 || height <= 0) return false
+        val o=objects[selected.coerceIn(0,objects.lastIndex)]
+        val center=projectPoint(o.x,o.y,o.z) ?: return false
+        if(tool=="ROTATE") {
+            val radius=kotlin.math.sqrt((sx-center[0])*(sx-center[0])+(sy-center[1])*(sy-center[1]))
+            val ring=projectPoint(o.x+0.72f,o.y,o.z) ?: return false
+            val r=kotlin.math.sqrt((ring[0]-center[0])*(ring[0]-center[0])+(ring[1]-center[1])*(ring[1]-center[1]))
+            if(kotlin.math.abs(radius-r)>20f*context.resources.displayMetrics.density) return false
+            dragAxis=1; rotateLastAngle=kotlin.math.atan2(sy-center[1],sx-center[0]); rotateLastX=sx; rotateLastY=sy; return true
+        }
+        val dirs=arrayOf(floatArrayOf(1f,0f,0f),floatArrayOf(0f,1f,0f),floatArrayOf(0f,0f,1f))
+        var best=Float.MAX_VALUE; var chosen=-1; var axisLen=1f; var ux=0f; var uy=0f
+        for(i in dirs.indices) {
+            val d=dirs[i]; val end=projectPoint(o.x+d[0]*1.45f,o.y+d[1]*1.45f,o.z+d[2]*1.45f) ?: continue
+            val (dist,len)=distToSegment(sx,sy,center,end)
+            if(dist<best && dist<54f*context.resources.displayMetrics.density) { best=dist; chosen=i; axisLen=len; val dx=end[0]-center[0]; val dy=end[1]-center[1]; val n=kotlin.math.sqrt(dx*dx+dy*dy).coerceAtLeast(1f); ux=dx/n; uy=dy/n }
+        }
+        dragAxis=chosen; dragAxisPixels=axisLen.coerceAtLeast(1f); dragAxisUx=ux; dragAxisUy=uy
+        return chosen>=0
+    }
     @Synchronized fun toolDrag(tool: String, dx: Float, dy: Float) {
-        if (objects.isEmpty()) return
+        if (objects.isEmpty() || dragAxis<0) return
         val o = objects[selected.coerceIn(0, objects.lastIndex)]
         when (tool) {
-            "MOVE" -> { o.x += dx * 0.012f; o.y = (o.y - dy * 0.012f).coerceAtLeast(0.08f) }
-            "ROTATE" -> o.rotation += dx * 0.7f
-            "SCALE" -> o.scale = (o.scale + dx * 0.004f).coerceIn(0.1f, 3f)
+            "MOVE" -> { val amount=(dx*dragAxisUx+dy*dragAxisUy)/dragAxisPixels*1.45f; when(dragAxis){0->o.x+=amount;1->o.y=(o.y+amount).coerceAtLeast(0.08f);2->o.z+=amount} }
+            "ROTATE" -> { val center=projectPoint(o.x,o.y,o.z) ?: return; val angle=kotlin.math.atan2(rotateLastY+dy-center[1],rotateLastX+dx-center[0]); var delta=angle-rotateLastAngle; if(delta>Math.PI)delta-=2f*Math.PI.toFloat(); if(delta< -Math.PI)delta+=2f*Math.PI.toFloat(); o.rotation += Math.toDegrees(delta.toDouble()).toFloat(); rotateLastAngle=angle; rotateLastX+=dx; rotateLastY+=dy }
+            "SCALE" -> { val amount=(dx*dragAxisUx+dy*dragAxisUy)/dragAxisPixels*1.7f; o.scale=(o.scale+amount).coerceIn(0.1f,3f) }
         }
+    }
+    @Synchronized fun selectAt(sx: Float, sy: Float) {
+        var best=Float.MAX_VALUE; var candidate=-1
+        objects.forEachIndexed { i,o -> val p=projectPoint(o.x,o.y,o.z) ?: return@forEachIndexed; val dx=sx-p[0]; val dy=sy-p[1]; val d=dx*dx+dy*dy; if(d<best){best=d;candidate=i} }
+        if(candidate>=0 && best< (110f*context.resources.displayMetrics.density).let{it*it}) selected=candidate
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -420,7 +462,29 @@ private class SceneRenderer(private val context: Context) : GLSurfaceView.Render
                 b?.let { GLES20.glVertexAttribPointer(pos, 3, GLES20.GL_FLOAT, false, 24, it); it.position(3); GLES20.glVertexAttribPointer(norm, 3, GLES20.GL_FLOAT, false, 24, it) }
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, count)
             }
+            val o=objects.getOrNull(selected)
+            if(o!=null) drawGizmo(o, activeGizmoMode, pos, norm, mvpLoc, modelLoc, colorLoc)
         }
+    }
+    @Volatile private var activeGizmoMode="MOVE"
+    @Synchronized fun setGizmoMode(mode:String){ activeGizmoMode=mode }
+    private fun drawGizmo(o: SceneObject, mode: String, p: Int, n: Int, ml: Int, modl: Int, cl: Int) {
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST); GLES20.glLineWidth(3f)
+        val colors=arrayOf(floatArrayOf(1f,0.18f,0.16f),floatArrayOf(0.24f,1f,0.28f),floatArrayOf(0.18f,0.48f,1f))
+        if(mode=="ROTATE") {
+            val arr=ArrayList<Float>(); val radius=0.72f; val steps=48
+            for(i in 0 until steps){ val a=2*Math.PI*i/steps; val b=2*Math.PI*(i+1)/steps; val x1=cos(a).toFloat()*radius; val z1=sin(a).toFloat()*radius; val x2=cos(b).toFloat()*radius; val z2=sin(b).toFloat()*radius
+                arr.add(o.x+x1);arr.add(o.y);arr.add(o.z+z1);arr.add(0f);arr.add(1f);arr.add(0f);arr.add(o.x+x2);arr.add(o.y);arr.add(o.z+z2);arr.add(0f);arr.add(1f);arr.add(0f) }
+            val b=buffer(arr.toFloatArray()); drawMesh(b,steps*2,GLES20.GL_LINES,1f,0.78f,0.12f,1f,p,n,ml,modl,cl)
+        } else {
+            for(axis in 0..2){ val end=1.45f; val v=when(axis){0->floatArrayOf(1f,0f,0f);1->floatArrayOf(0f,1f,0f);else->floatArrayOf(0f,0f,1f)}
+                val values=ArrayList<Float>(); fun pt(t:Float,side:Float=0f){ val x=o.x+v[0]*t+if(axis==1) side else 0f; val y=o.y+v[1]*t+if(axis==0) side else 0f; val z=o.z+v[2]*t+if(axis==2) side else 0f; values.add(x);values.add(y);values.add(z);values.add(0f);values.add(0f);values.add(1f) }
+                pt(0f);pt(end); val head=.16f
+                for(side in arrayOf(-1f,1f)){pt(end); when(axis){0->{pt(end-head,side*head*.55f)};1->{pt(end-head,side*head*.55f)};else->{pt(end-head,side*head*.55f)}} }
+                val b=buffer(values.toFloatArray()); drawMesh(b,6,GLES20.GL_LINES,colors[axis][0],colors[axis][1],colors[axis][2],1f,p,n,ml,modl,cl)
+            }
+        }
+        GLES20.glLineWidth(1f); GLES20.glEnable(GLES20.GL_DEPTH_TEST)
     }
     private fun drawMesh(b: FloatBuffer?, count: Int, mode: Int, r: Float, g: Float, bl: Float, a: Float, p: Int, n: Int, ml: Int, modl: Int, cl: Int) {
         if (b == null) return
